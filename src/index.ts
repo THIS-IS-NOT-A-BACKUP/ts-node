@@ -47,18 +47,31 @@ export type {
 const engineSupportsPackageTypeField =
   parseInt(process.versions.node.split('.')[0], 10) >= 12;
 
-function versionGte(version: string, requirement: string) {
-  const [major, minor, patch, extra] = version
-    .split(/[\.-]/)
-    .map((s) => parseInt(s, 10));
-  const [reqMajor, reqMinor, reqPatch] = requirement
-    .split('.')
-    .map((s) => parseInt(s, 10));
-  return (
-    major > reqMajor ||
-    (major === reqMajor &&
-      (minor > reqMinor || (minor === reqMinor && patch >= reqPatch)))
-  );
+/** @internal */
+export function versionGteLt(
+  version: string,
+  gteRequirement: string,
+  ltRequirement?: string
+) {
+  const [major, minor, patch, extra] = parse(version);
+  const [gteMajor, gteMinor, gtePatch] = parse(gteRequirement);
+  const isGte =
+    major > gteMajor ||
+    (major === gteMajor &&
+      (minor > gteMinor || (minor === gteMinor && patch >= gtePatch)));
+  let isLt = true;
+  if (ltRequirement) {
+    const [ltMajor, ltMinor, ltPatch] = parse(ltRequirement);
+    isLt =
+      major < ltMajor ||
+      (major === ltMajor &&
+        (minor < ltMinor || (minor === ltMinor && patch < ltPatch)));
+  }
+  return isGte && isLt;
+
+  function parse(requirement: string) {
+    return requirement.split(/[\.-]/).map((s) => parseInt(s, 10));
+  }
 }
 
 /**
@@ -295,12 +308,6 @@ export interface CreateOptions {
     | _ts.CustomTransformers
     | ((p: _ts.Program) => _ts.CustomTransformers);
   /**
-   * True if require() hooks should interop with experimental ESM loader.
-   * Enabled explicitly via a flag since it is a breaking change.
-   * @internal
-   */
-  experimentalEsmLoader?: boolean;
-  /**
    * Allows the usage of top level await in REPL.
    *
    * Uses node's implementation which accomplishes this with an AST syntax transformation.
@@ -369,7 +376,6 @@ export interface TsConfigOptions
     | 'dir'
     | 'cwd'
     | 'projectSearchDir'
-    | 'experimentalEsmLoader'
     | 'optionBasePaths'
   > {}
 
@@ -405,7 +411,6 @@ export const DEFAULTS: RegisterOptions = {
   typeCheck: yn(env.TS_NODE_TYPE_CHECK),
   compilerHost: yn(env.TS_NODE_COMPILER_HOST),
   logError: yn(env.TS_NODE_LOG_ERROR),
-  experimentalEsmLoader: false,
   experimentalReplAwait: yn(env.TS_NODE_EXPERIMENTAL_REPL_AWAIT) ?? undefined,
 };
 
@@ -452,6 +457,8 @@ export interface Service {
   addDiagnosticFilter(filter: DiagnosticFilter): void;
   /** @internal */
   installSourceMapSupport(): void;
+  /** @internal */
+  enableExperimentalEsmLoaderInterop(): void;
 }
 
 /**
@@ -576,7 +583,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
     );
   }
   // Top-level await was added in TS 3.8
-  const tsVersionSupportsTla = versionGte(ts.version, '3.8.0');
+  const tsVersionSupportsTla = versionGteLt(ts.version, '3.8.0');
   if (options.experimentalReplAwait === true && !tsVersionSupportsTla) {
     throw new Error(
       'Experimental REPL await is not compatible with TypeScript versions older than 3.8'
@@ -678,6 +685,15 @@ export function create(rawOptions: CreateOptions = {}): Service {
     });
   }
 
+  /**
+   * True if require() hooks should interop with experimental ESM loader.
+   * Enabled explicitly via a flag since it is a breaking change.
+   */
+  let experimentalEsmLoader = false;
+  function enableExperimentalEsmLoaderInterop() {
+    experimentalEsmLoader = true;
+  }
+
   // Install source map support and read from memory cache.
   installSourceMapSupport();
   function installSourceMapSupport() {
@@ -688,7 +704,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
         // If it's a file URL, convert to local path
         // Note: fileURLToPath does not exist on early node v10
         // I could not find a way to handle non-URLs except to swallow an error
-        if (options.experimentalEsmLoader && path.startsWith('file://')) {
+        if (experimentalEsmLoader && path.startsWith('file://')) {
           try {
             path = fileURLToPath(path);
           } catch (e) {
@@ -1274,6 +1290,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
     shouldReplAwait,
     addDiagnosticFilter,
     installSourceMapSupport,
+    enableExperimentalEsmLoaderInterop,
   };
 }
 
@@ -1468,3 +1485,8 @@ function getTokenAtPosition(
     return current;
   }
 }
+
+import type { createEsmHooks as createEsmHooksFn } from './esm';
+export const createEsmHooks: typeof createEsmHooksFn = (
+  tsNodeService: Service
+) => require('./esm').createEsmHooks(tsNodeService);
