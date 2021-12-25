@@ -1086,10 +1086,7 @@ test.suite('ts-node', (test) => {
 
       test.suite('supports experimental-specifier-resolution=node', (test) => {
         test('via --experimental-specifier-resolution', async () => {
-          const {
-            err,
-            stdout,
-          } = await exec(
+          const { err, stdout } = await exec(
             `${CMD_ESM_LOADER_WITHOUT_PROJECT} --experimental-specifier-resolution=node index.ts`,
             { cwd: join(TEST_DIR, './esm-node-resolver') }
           );
@@ -1097,10 +1094,7 @@ test.suite('ts-node', (test) => {
           expect(stdout).toBe('foo bar baz biff libfoo\n');
         });
         test('via --es-module-specifier-resolution alias', async () => {
-          const {
-            err,
-            stdout,
-          } = await exec(
+          const { err, stdout } = await exec(
             `${CMD_ESM_LOADER_WITHOUT_PROJECT} ${EXPERIMENTAL_MODULES_FLAG} --es-module-specifier-resolution=node index.ts`,
             { cwd: join(TEST_DIR, './esm-node-resolver') }
           );
@@ -1146,7 +1140,7 @@ test.suite('ts-node', (test) => {
         expect(err).not.toBe(null);
         // expect error from node's default resolver
         expect(stderr).toMatch(
-          /Error \[ERR_UNSUPPORTED_ESM_URL_SCHEME\]:.*(?:\n.*){0,1}\n *at defaultResolve/
+          /Error \[ERR_UNSUPPORTED_ESM_URL_SCHEME\]:.*(?:\n.*){0,2}\n *at defaultResolve/
         );
       });
 
