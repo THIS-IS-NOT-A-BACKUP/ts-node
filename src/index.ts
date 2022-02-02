@@ -349,7 +349,7 @@ export interface CreateOptions {
    * `package` overrides either of the above to default behavior, which obeys package.json "type" and
    * tsconfig.json "module" options.
    */
-  moduleTypes?: Record<string, 'cjs' | 'esm' | 'package'>;
+  moduleTypes?: ModuleTypes;
   /**
    * @internal
    * Set by our configuration loader whenever a config file contains options that
@@ -365,6 +365,8 @@ export interface CreateOptions {
    */
   tsTrace?: (str: string) => void;
 }
+
+type ModuleTypes = Record<string, 'cjs' | 'esm' | 'package'>;
 
 /** @internal */
 export interface OptionBasePaths {
@@ -475,6 +477,8 @@ export interface Service {
   /** @internal */
   [TS_NODE_SERVICE_BRAND]: true;
   ts: TSCommon;
+  /** @internal */
+  compilerPath: string;
   config: _ts.ParsedCommandLine;
   options: RegisterOptions;
   enabled(enabled?: boolean): boolean;
@@ -1338,6 +1342,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
   return {
     [TS_NODE_SERVICE_BRAND]: true,
     ts,
+    compilerPath: compiler,
     config,
     compile,
     getTypeInfo,
