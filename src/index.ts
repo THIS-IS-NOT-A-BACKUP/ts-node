@@ -12,8 +12,11 @@ import {
   assign,
   attemptRequireWithV8CompileCache,
   cachedLookup,
+  createProjectLocalResolveHelper,
+  getBasePathForProjectLocalDependencyResolution,
   normalizeSlashes,
   parse,
+  ProjectLocalResolveHelper,
   split,
   yn,
 } from './util';
@@ -265,6 +268,8 @@ export interface CreateOptions {
    * Transpile with swc instead of the TypeScript compiler, and skip typechecking.
    *
    * Equivalent to setting both `transpileOnly: true` and `transpiler: 'ts-node/transpilers/swc'`
+   *
+   * For complete instructions: https://typestrong.org/ts-node/docs/transpilers
    */
   swc?: boolean;
   /**
@@ -366,11 +371,13 @@ export interface CreateOptions {
   tsTrace?: (str: string) => void;
 }
 
-type ModuleTypes = Record<string, 'cjs' | 'esm' | 'package'>;
+export type ModuleTypes = Record<string, 'cjs' | 'esm' | 'package'>;
 
 /** @internal */
 export interface OptionBasePaths {
   moduleTypes?: string;
+  transpiler?: string;
+  compiler?: string;
 }
 
 /**
@@ -455,9 +462,15 @@ export const DEFAULTS: RegisterOptions = {
  */
 export class TSError extends BaseError {
   name = 'TSError';
+  diagnosticText!: string;
 
-  constructor(public diagnosticText: string, public diagnosticCodes: number[]) {
+  constructor(diagnosticText: string, public diagnosticCodes: number[]) {
     super(`⨯ Unable to compile TypeScript:\n${diagnosticText}`);
+    Object.defineProperty(this, 'diagnosticText', {
+      configurable: true,
+      writable: true,
+      value: diagnosticText,
+    });
   }
 
   /**
@@ -499,6 +512,8 @@ export interface Service {
   enableExperimentalEsmLoaderInterop(): void;
   /** @internal */
   transpileOnly: boolean;
+  /** @internal */
+  projectLocalResolveHelper: ProjectLocalResolveHelper;
 }
 
 /**
@@ -587,17 +602,22 @@ export function create(rawOptions: CreateOptions = {}): Service {
    * be changed by the tsconfig, so we have to do this twice.
    */
   function loadCompiler(name: string | undefined, relativeToPath: string) {
-    const compiler = require.resolve(name || 'typescript', {
-      paths: [relativeToPath, __dirname],
-    });
+    const projectLocalResolveHelper =
+      createProjectLocalResolveHelper(relativeToPath);
+    const compiler = projectLocalResolveHelper(name || 'typescript', true);
     const ts: typeof _ts = attemptRequireWithV8CompileCache(require, compiler);
-    return { compiler, ts };
+    return { compiler, ts, projectLocalResolveHelper };
   }
 
   // Compute minimum options to read the config file.
-  let { compiler, ts } = loadCompiler(
+  let { compiler, ts, projectLocalResolveHelper } = loadCompiler(
     compilerName,
-    rawOptions.projectSearchDir ?? rawOptions.project ?? cwd
+    getBasePathForProjectLocalDependencyResolution(
+      undefined,
+      rawOptions.projectSearchDir,
+      rawOptions.project,
+      cwd
+    )
   );
 
   // Read config file and merge new options between env and CLI options.
@@ -614,6 +634,21 @@ export function create(rawOptions: CreateOptions = {}): Service {
     ...(tsNodeOptionsFromTsconfig.require || []),
     ...(rawOptions.require || []),
   ];
+
+  // Re-load the compiler in case it has changed.
+  // Compiler is loaded relative to tsconfig.json, so tsconfig discovery may cause us to load a
+  // different compiler than we did above, even if the name has not changed.
+  if (configFilePath) {
+    ({ compiler, ts, projectLocalResolveHelper } = loadCompiler(
+      options.compiler,
+      getBasePathForProjectLocalDependencyResolution(
+        configFilePath,
+        rawOptions.projectSearchDir,
+        rawOptions.project,
+        cwd
+      )
+    ));
+  }
 
   // Experimental REPL await is not compatible targets lower than ES2018
   const targetSupportsTla = config.options.target! >= ts.ScriptTarget.ES2018;
@@ -634,13 +669,6 @@ export function create(rawOptions: CreateOptions = {}): Service {
     options.experimentalReplAwait !== false &&
     tsVersionSupportsTla &&
     targetSupportsTla;
-
-  // Re-load the compiler in case it has changed.
-  // Compiler is loaded relative to tsconfig.json, so tsconfig discovery may cause us to load a
-  // different compiler than we did above, even if the name has not changed.
-  if (configFilePath) {
-    ({ compiler, ts } = loadCompiler(options.compiler, configFilePath));
-  }
 
   // swc implies two other options
   // typeCheck option was implemented specifically to allow overriding tsconfig transpileOnly from the command-line
@@ -733,14 +761,10 @@ export function create(rawOptions: CreateOptions = {}): Service {
       typeof transpiler === 'string' ? transpiler : transpiler[0];
     const transpilerOptions =
       typeof transpiler === 'string' ? {} : transpiler[1] ?? {};
-    // TODO mimic fixed resolution logic from loadCompiler main
-    // TODO refactor into a more generic "resolve dep relative to project" helper
-    const transpilerPath = require.resolve(transpilerName, {
-      paths: [cwd, __dirname],
-    });
+    const transpilerPath = projectLocalResolveHelper(transpilerName, true);
     const transpilerFactory: TranspilerFactory = require(transpilerPath).create;
     customTranspiler = transpilerFactory({
-      service: { options, config },
+      service: { options, config, projectLocalResolveHelper },
       ...transpilerOptions,
     });
   }
@@ -925,7 +949,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
         ts,
         cwd,
         config,
-        configFilePath,
+        projectLocalResolveHelper,
       });
       serviceHost.resolveModuleNames = resolveModuleNames;
       serviceHost.getResolvedModuleWithFailedLookupLocationsFromCache =
@@ -998,7 +1022,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
         if (diagnosticList.length) reportTSError(diagnosticList);
 
         if (output.emitSkipped) {
-          throw new TypeError(`${relative(cwd, fileName)}: Emit skipped`);
+          return [undefined, undefined, true];
         }
 
         // Throw an error when requiring `.d.ts` files.
@@ -1011,7 +1035,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
           );
         }
 
-        return [output.outputFiles[1].text, output.outputFiles[0].text];
+        return [output.outputFiles[1].text, output.outputFiles[0].text, false];
       };
 
       getTypeInfo = (code: string, fileName: string, position: number) => {
@@ -1076,10 +1100,10 @@ export function create(rawOptions: CreateOptions = {}): Service {
       } = createResolverFunctions({
         host,
         cwd,
-        configFilePath,
         config,
         ts,
         getCanonicalFileName,
+        projectLocalResolveHelper,
       });
       host.resolveModuleNames = resolveModuleNames;
       host.resolveTypeReferenceDirectives = resolveTypeReferenceDirectives;
@@ -1141,7 +1165,8 @@ export function create(rawOptions: CreateOptions = {}): Service {
       };
 
       getOutput = (code: string, fileName: string) => {
-        const output: [string, string] = ['', ''];
+        let outText = '';
+        let outMap = '';
 
         updateMemoryCache(code, fileName);
 
@@ -1161,9 +1186,9 @@ export function create(rawOptions: CreateOptions = {}): Service {
           sourceFile,
           (path, file, writeByteOrderMark) => {
             if (path.endsWith('.map')) {
-              output[1] = file;
+              outMap = file;
             } else {
-              output[0] = file;
+              outText = file;
             }
 
             if (options.emit) sys.writeFile(path, file, writeByteOrderMark);
@@ -1174,11 +1199,11 @@ export function create(rawOptions: CreateOptions = {}): Service {
         );
 
         if (result.emitSkipped) {
-          throw new TypeError(`${relative(cwd, fileName)}: Emit skipped`);
+          return [undefined, undefined, true];
         }
 
         // Throw an error when requiring files that cannot be compiled.
-        if (output[0] === '') {
+        if (outText === '') {
           if (program.isSourceFileFromExternalLibrary(sourceFile)) {
             throw new TypeError(
               `Unable to compile file from external library: ${relative(
@@ -1196,7 +1221,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
           );
         }
 
-        return output;
+        return [outText, outMap, false];
       };
 
       getTypeInfo = (code: string, fileName: string, position: number) => {
@@ -1273,7 +1298,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
       );
       if (diagnosticList.length) reportTSError(diagnosticList);
 
-      return [result.outputText, result.sourceMapText as string];
+      return [result.outputText, result.sourceMapText as string, false];
     };
   }
 
@@ -1290,6 +1315,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
       : createTranspileOnlyGetOutputFunction(
           ts.ModuleKind.ES2020 || ts.ModuleKind.ES2015
         );
+  const getOutputTranspileOnly = createTranspileOnlyGetOutputFunction();
 
   // Create a simple TypeScript compiler proxy.
   function compile(code: string, fileName: string, lineOffset = 0) {
@@ -1297,17 +1323,19 @@ export function create(rawOptions: CreateOptions = {}): Service {
     const classification =
       moduleTypeClassifier.classifyModule(normalizedFileName);
     // Must always call normal getOutput to throw typechecking errors
-    let [value, sourceMap] = getOutput(code, normalizedFileName);
+    let [value, sourceMap, emitSkipped] = getOutput(code, normalizedFileName);
     // If module classification contradicts the above, call the relevant transpiler
     if (classification.moduleType === 'cjs' && getOutputForceCommonJS) {
       [value, sourceMap] = getOutputForceCommonJS(code, normalizedFileName);
     } else if (classification.moduleType === 'esm' && getOutputForceESM) {
       [value, sourceMap] = getOutputForceESM(code, normalizedFileName);
+    } else if (emitSkipped) {
+      [value, sourceMap] = getOutputTranspileOnly(code, normalizedFileName);
     }
     const output = updateOutput(
-      value,
+      value!,
       normalizedFileName,
-      sourceMap,
+      sourceMap!,
       getExtension
     );
     outputCache.set(normalizedFileName, { content: output });
@@ -1356,6 +1384,7 @@ export function create(rawOptions: CreateOptions = {}): Service {
     installSourceMapSupport,
     enableExperimentalEsmLoaderInterop,
     transpileOnly,
+    projectLocalResolveHelper,
   };
 }
 
@@ -1437,7 +1466,7 @@ function registerExtension(
 /**
  * Internal source output.
  */
-type SourceOutput = [string, string];
+type SourceOutput = [string, string, false] | [undefined, undefined, true];
 
 /**
  * Update the output remapping the source map.

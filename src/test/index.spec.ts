@@ -79,6 +79,14 @@ test.suite('ts-node', (test) => {
     testsDirRequire.resolve('ts-node/node16/tsconfig.json');
   });
 
+  test('should not load typescript outside of loadConfig', async () => {
+    const { err, stdout } = await exec(
+      `node -e "require('ts-node'); console.dir(Object.keys(require.cache).filter(k => k.includes('node_modules/typescript')).length)"`
+    );
+    expect(err).toBe(null);
+    expect(stdout).toBe('0\n');
+  });
+
   test.suite('cli', (test) => {
     test('should execute cli', async () => {
       const { err, stdout } = await exec(
@@ -1247,4 +1255,15 @@ test.suite('ts-node', (test) => {
       });
     }
   });
+});
+
+test('Falls back to transpileOnly when ts compiler returns emitSkipped', async () => {
+  const { err, stdout } = await exec(
+    `${CMD_TS_NODE_WITHOUT_PROJECT_FLAG} --project tsconfig.json ./outside-rootDir/foo.js`,
+    {
+      cwd: join(TEST_DIR, 'emit-skipped-fallback'),
+    }
+  );
+  expect(err).toBe(null);
+  expect(stdout).toBe('foo\n');
 });
