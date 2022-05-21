@@ -17,6 +17,7 @@ import {
   parse,
   ProjectLocalResolveHelper,
   split,
+  versionGteLt,
   yn,
 } from './util';
 import { findAndReadConfig, loadCompiler } from './configuration';
@@ -65,33 +66,6 @@ export type {
  */
 const engineSupportsPackageTypeField =
   parseInt(process.versions.node.split('.')[0], 10) >= 12;
-
-/** @internal */
-export function versionGteLt(
-  version: string,
-  gteRequirement: string,
-  ltRequirement?: string
-) {
-  const [major, minor, patch, extra] = parse(version);
-  const [gteMajor, gteMinor, gtePatch] = parse(gteRequirement);
-  const isGte =
-    major > gteMajor ||
-    (major === gteMajor &&
-      (minor > gteMinor || (minor === gteMinor && patch >= gtePatch)));
-  let isLt = true;
-  if (ltRequirement) {
-    const [ltMajor, ltMinor, ltPatch] = parse(ltRequirement);
-    isLt =
-      major < ltMajor ||
-      (major === ltMajor &&
-        (minor < ltMinor || (minor === ltMinor && patch < ltPatch)));
-  }
-  return isGte && isLt;
-
-  function parse(requirement: string) {
-    return requirement.split(/[\.-]/).map((s) => parseInt(s, 10));
-  }
-}
 
 /**
  * Assert that script can be loaded as CommonJS when we attempt to require it.
@@ -393,6 +367,12 @@ export interface CreateOptions {
    * @default false
    */
   preferTsExts?: boolean;
+  /**
+   * Like node's `--experimental-specifier-resolution`, , but can also be set in your `tsconfig.json` for convenience.
+   *
+   * For details, see https://nodejs.org/dist/latest-v18.x/docs/api/esm.html#customizing-esm-specifier-resolution-algorithm
+   */
+  experimentalSpecifierResolution?: 'node' | 'explicit';
 }
 
 export type ModuleTypes = Record<string, ModuleTypeOverride>;
@@ -420,9 +400,6 @@ export interface RegisterOptions extends CreateOptions {
    * For details, see https://github.com/TypeStrong/ts-node/issues/1514
    */
   experimentalResolver?: boolean;
-
-  /** @internal */
-  experimentalSpecifierResolution?: 'node' | 'explicit';
 }
 
 export type ExperimentalSpecifierResolution = 'node' | 'explicit';
@@ -1097,9 +1074,13 @@ export function createFromPreloadedConfig(
       };
 
       getTypeInfo = (code: string, fileName: string, position: number) => {
-        updateMemoryCache(code, fileName);
+        const normalizedFileName = normalizeSlashes(fileName);
+        updateMemoryCache(code, normalizedFileName);
 
-        const info = service.getQuickInfoAtPosition(fileName, position);
+        const info = service.getQuickInfoAtPosition(
+          normalizedFileName,
+          position
+        );
         const name = ts.displayPartsToString(info ? info.displayParts : []);
         const comment = ts.displayPartsToString(info ? info.documentation : []);
 
@@ -1283,9 +1264,10 @@ export function createFromPreloadedConfig(
       };
 
       getTypeInfo = (code: string, fileName: string, position: number) => {
-        updateMemoryCache(code, fileName);
+        const normalizedFileName = normalizeSlashes(fileName);
+        updateMemoryCache(code, normalizedFileName);
 
-        const sourceFile = builderProgram.getSourceFile(fileName);
+        const sourceFile = builderProgram.getSourceFile(normalizedFileName);
         if (!sourceFile)
           throw new TypeError(`Unable to read file: ${fileName}`);
 
