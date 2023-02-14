@@ -4,7 +4,7 @@ import { join, resolve, dirname, parse as parsePath, relative } from 'path';
 import { inspect } from 'util';
 import Module = require('module');
 let arg: typeof import('arg');
-import { parse, createRequire, hasOwnProperty, versionGteLt } from './util';
+import { parse, hasOwnProperty, versionGteLt } from './util';
 import {
   EVAL_FILENAME,
   EvalState,
@@ -517,7 +517,8 @@ function phase4(payload: BootstrapState) {
     module.paths = (Module as any)._nodeModulePaths(cwd);
   }
   if (executeRepl) {
-    const state = new EvalState(join(cwd, REPL_FILENAME));
+    // correct path is set later
+    const state = new EvalState('');
     replStuff = {
       state,
       repl: createRepl({
@@ -541,6 +542,10 @@ function phase4(payload: BootstrapState) {
     },
   });
   register(service);
+
+  if (replStuff)
+    replStuff.state.path = join(cwd, REPL_FILENAME(service.ts.version));
+
   if (isInChildProcess)
     (
       require('./child/child-loader') as typeof import('./child/child-loader')
@@ -734,7 +739,7 @@ function requireResolveNonCached(absoluteModuleSpecifier: string) {
   const { dir, base } = parsePath(absoluteModuleSpecifier);
   const relativeModuleSpecifier = `./${base}`;
 
-  const req = createRequire(
+  const req = Module.createRequire(
     join(dir, 'imaginaryUncacheableRequireResolveScript')
   );
   return req.resolve(relativeModuleSpecifier, {
